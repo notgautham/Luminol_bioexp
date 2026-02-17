@@ -1,8 +1,149 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-body {
-  @apply bg-slate-950 text-slate-50;
-  font-family: 'Inter', sans-serif;
+@layer base {
+
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    @apply bg-surface-0 text-slate-200 font-sans;
+    margin: 0;
+    min-height: 100vh;
+  }
+
+  ::selection {
+    @apply bg-accent/30 text-white;
+  }
+
+  /* Custom scrollbar */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-muted-faint rounded-full;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-muted-dim;
+  }
+
+  /* Remove default input styling */
+  input[type="number"]::-webkit-inner-spin-button,
+  input[type="number"]::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+
+  input[type="number"] {
+    -moz-appearance: textfield;
+  }
+}
+
+@layer components {
+
+  /* Card system */
+  .card {
+    @apply bg-surface-2 border border-border rounded-card shadow-card;
+  }
+
+  .card-hover {
+    @apply card transition-all duration-200;
+  }
+
+  .card-hover:hover {
+    @apply border-border-hover shadow-elevated;
+  }
+
+  /* Input fields */
+  .input-field {
+    @apply w-full bg-surface-1 border border-border rounded-lg px-3 py-2.5 text-sm text-slate-200 font-mono placeholder-muted-dim outline-none transition-all duration-200;
+  }
+
+  .input-field:focus {
+    @apply border-accent/50 ring-1 ring-accent/20 bg-surface-0;
+  }
+
+  /* Buttons */
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium rounded-lg transition-all duration-200 disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+
+  .btn-primary {
+    @apply btn bg-accent hover:bg-accent-dim text-white shadow-md hover:shadow-glow active:scale-[0.98];
+  }
+
+  .btn-secondary {
+    @apply btn bg-surface-3 hover:bg-surface-4 text-slate-300 border border-border hover:border-border-hover;
+  }
+
+  .btn-outline {
+    @apply btn bg-transparent border border-border text-muted hover:border-accent/40 hover:text-accent-glow hover:bg-accent-surface;
+  }
+
+  .btn-danger {
+    @apply btn bg-danger-surface border border-danger/20 text-danger hover:bg-danger/10 hover:border-danger/40;
+  }
+
+  .btn-icon {
+    @apply p-2 rounded-lg text-muted hover:text-slate-300 hover:bg-surface-3 transition-all duration-150;
+  }
+
+  /* Label */
+  .field-label {
+    @apply block text-[11px] font-semibold text-muted uppercase tracking-widest mb-1.5;
+  }
+
+  /* Badge system */
+  .badge {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wider rounded-full;
+  }
+
+  .badge-pending {
+    @apply badge bg-surface-3 text-muted border border-border;
+  }
+
+  .badge-processing {
+    @apply badge bg-accent-surface text-accent-glow border border-accent/20;
+  }
+
+  .badge-success {
+    @apply badge bg-success-surface text-success border border-success/20;
+  }
+
+  .badge-error {
+    @apply badge bg-danger-surface text-danger border border-danger/20;
+  }
+
+  /* Section heading */
+  .section-title {
+    @apply text-[11px] font-bold uppercase tracking-[0.1em] text-muted;
+  }
+
+  /* Progress bar */
+  .progress-track {
+    @apply w-full h-1 bg-surface-1 rounded-full overflow-hidden;
+  }
+
+  .progress-fill {
+    @apply h-full rounded-full transition-all duration-500 ease-out;
+  }
 }

@@ -1,14 +1,7 @@
 import React from 'react';
-import { Upload, Play, Trash2, FileJson, ToggleLeft, ToggleRight, FileDown } from 'lucide-react';
-import { clsx } from 'clsx';
-import { twMerge } from 'tailwind-merge';
-
-function cn(...inputs) {
-    return twMerge(clsx(inputs));
-}
+import { Play, Trash2, FileDown, Bug, Zap } from 'lucide-react';
 
 export function ControlPanel({
-    onUpload,
     onStart,
     onClear,
     onExport,
@@ -18,112 +11,139 @@ export function ControlPanel({
     setDebugMode,
     queueLength,
     isProcessing,
-    fileInputRef
+    doneCount,
 }) {
     return (
-        <div className="bg-slate-900/80 backdrop-blur-md border-b border-slate-800 sticky top-0 z-50 p-4 shadow-xl">
-            <div className="max-w-6xl mx-auto flex flex-col md:flex-row gap-4 justify-between items-center">
+        <aside className="w-full lg:w-[300px] xl:w-[320px] flex-shrink-0">
+            <div className="card p-5 space-y-6 sticky top-24">
 
-                {/* Upload & Actions */}
-                <div className="flex gap-2 w-full md:w-auto">
-                    <button
-                        onClick={() => fileInputRef.current?.click()}
-                        className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg font-medium transition-colors shadow-lg shadow-blue-900/20"
-                    >
-                        <Upload size={18} />
-                        <span className="hidden sm:inline">Add Images</span>
-                        <span className="inline sm:hidden">Add</span>
-                    </button>
+                {/* Section: Acquisition Parameters */}
+                <div>
+                    <h2 className="section-title flex items-center gap-2 mb-4">
+                        <Zap size={12} className="text-accent-glow" />
+                        Acquisition Parameters
+                    </h2>
 
-                    <button
-                        onClick={onStart}
-                        disabled={queueLength === 0 || isProcessing}
-                        className={cn(
-                            "flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all",
-                            isProcessing
-                                ? "bg-slate-800 text-slate-500 cursor-not-allowed"
-                                : queueLength > 0
-                                    ? "bg-green-600 hover:bg-green-500 text-white shadow-lg shadow-green-900/20"
-                                    : "bg-slate-800 text-slate-500 cursor-not-allowed"
-                        )}
-                    >
-                        <Play size={18} className={isProcessing ? "animate-pulse" : ""} />
-                        <span>{isProcessing ? "Processing..." : "Start"}</span>
-                    </button>
-
-                    <button
-                        onClick={onClear}
-                        disabled={queueLength === 0 || isProcessing}
-                        className="p-2 text-slate-400 hover:text-red-400 hover:bg-red-950/30 rounded-lg transition-colors disabled:opacity-30"
-                        title="Clear Queue"
-                    >
-                        <Trash2 size={20} />
-                    </button>
-                </div>
-
-                {/* Global Settings */}
-                <div className="flex gap-4 items-center bg-slate-950/50 p-2 rounded-lg border border-slate-800">
-                    <div className="flex gap-3">
-                        <div className="flex flex-col">
-                            <label className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Exposure (s)</label>
+                    <div className="space-y-4">
+                        <div>
+                            <label className="field-label">Exposure Time (s)</label>
                             <input
                                 type="number"
-                                value={globalSettings.t}
-                                onChange={(e) => setGlobalSettings({ ...globalSettings, t: parseFloat(e.target.value) || 0 })}
+                                className="input-field"
+                                value={globalSettings.t || ''}
+                                onChange={(e) => setGlobalSettings({ ...globalSettings, t: parseFloat(e.target.value) || '' })}
                                 placeholder="e.g. 10"
-                                className="bg-transparent text-slate-200 text-sm font-mono w-20 outline-none border-b border-slate-700 focus:border-blue-500 transition-colors"
+                                step="0.1"
                             />
                         </div>
-                        <div className="w-px bg-slate-800 self-stretch my-1"></div>
-                        <div className="flex flex-col">
-                            <label className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">ISO</label>
+
+                        <div>
+                            <label className="field-label">ISO</label>
                             <input
                                 type="number"
-                                value={globalSettings.iso}
-                                onChange={(e) => setGlobalSettings({ ...globalSettings, iso: parseFloat(e.target.value) || 0 })}
+                                className="input-field"
+                                value={globalSettings.iso || ''}
+                                onChange={(e) => setGlobalSettings({ ...globalSettings, iso: parseFloat(e.target.value) || '' })}
                                 placeholder="e.g. 800"
-                                className="bg-transparent text-slate-200 text-sm font-mono w-20 outline-none border-b border-slate-700 focus:border-blue-500 transition-colors"
                             />
                         </div>
-                        <div className="w-px bg-slate-800 self-stretch my-1"></div>
-                        <div className="flex flex-col">
-                            <label className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Aperture (f/)</label>
+
+                        <div>
+                            <label className="field-label">Aperture f/ <span className="text-muted-dim font-normal normal-case tracking-normal">(optional)</span></label>
                             <input
                                 type="number"
+                                className="input-field"
                                 value={globalSettings.f || ''}
                                 onChange={(e) => setGlobalSettings({ ...globalSettings, f: parseFloat(e.target.value) || '' })}
-                                placeholder="Optional"
-                                className="bg-transparent text-slate-200 text-sm font-mono w-20 outline-none border-b border-slate-700 focus:border-blue-500 transition-colors"
+                                placeholder="e.g. 2.8"
+                                step="0.1"
                             />
                         </div>
                     </div>
                 </div>
 
-                {/* Toggles & Meta */}
-                <div className="flex items-center gap-3">
-                    <button
-                        onClick={() => setDebugMode(!debugMode)}
-                        className={cn(
-                            "flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium border transition-all",
-                            debugMode
-                                ? "bg-amber-950/30 border-amber-800 text-amber-500"
-                                : "bg-slate-900 border-slate-700 text-slate-500 hover:border-slate-600"
-                        )}
-                    >
-                        {debugMode ? <ToggleRight size={16} /> : <ToggleLeft size={16} />}
+                {/* Divider */}
+                <div className="h-px bg-border" />
+
+                {/* Debug Toggle */}
+                <div className="flex items-center justify-between">
+                    <label className="flex items-center gap-2 text-sm text-slate-400 cursor-pointer select-none" htmlFor="debug-toggle">
+                        <Bug size={14} />
                         Debug Mode
+                    </label>
+                    <button
+                        id="debug-toggle"
+                        role="switch"
+                        aria-checked={debugMode}
+                        onClick={() => setDebugMode(!debugMode)}
+                        className={`
+              relative w-10 h-[22px] rounded-full transition-colors duration-200
+              ${debugMode ? 'bg-accent' : 'bg-surface-4'}
+            `}
+                    >
+                        <span className={`
+              absolute top-[3px] w-4 h-4 rounded-full bg-white shadow-md
+              transition-transform duration-200
+              ${debugMode ? 'left-[22px]' : 'left-[3px]'}
+            `} />
+                    </button>
+                </div>
+
+                {/* Divider */}
+                <div className="h-px bg-border" />
+
+                {/* Actions */}
+                <div className="space-y-2.5">
+                    <button
+                        onClick={onStart}
+                        disabled={queueLength === 0 || isProcessing}
+                        className="btn-primary w-full"
+                    >
+                        <Play size={16} />
+                        {isProcessing ? 'Processing…' : 'Process Queue'}
+                    </button>
+
+                    <button
+                        onClick={onClear}
+                        disabled={queueLength === 0 || isProcessing}
+                        className="btn-secondary w-full"
+                    >
+                        <Trash2 size={15} />
+                        Clear All
                     </button>
 
                     <button
                         onClick={onExport}
-                        disabled={queueLength === 0}
-                        className="flex items-center gap-2 text-blue-400 hover:text-blue-300 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                        disabled={doneCount === 0}
+                        className="btn-outline w-full"
                     >
-                        <FileDown size={20} />
+                        <FileDown size={15} />
+                        Export Results
                     </button>
                 </div>
 
+                {/* Queue Stats */}
+                {queueLength > 0 && (
+                    <>
+                        <div className="h-px bg-border" />
+                        <div className="grid grid-cols-3 gap-3 text-center">
+                            <div>
+                                <div className="text-lg font-semibold text-slate-200 font-mono">{queueLength}</div>
+                                <div className="text-[10px] text-muted uppercase tracking-wider">Total</div>
+                            </div>
+                            <div>
+                                <div className="text-lg font-semibold text-accent-glow font-mono">{doneCount}</div>
+                                <div className="text-[10px] text-muted uppercase tracking-wider">Done</div>
+                            </div>
+                            <div>
+                                <div className="text-lg font-semibold text-warn font-mono">{queueLength - doneCount}</div>
+                                <div className="text-[10px] text-muted uppercase tracking-wider">Pending</div>
+                            </div>
+                        </div>
+                    </>
+                )}
+
             </div>
-        </div>
+        </aside>
     );
 }

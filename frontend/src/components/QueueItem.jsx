@@ -1,219 +1,275 @@
 import React, { useState } from 'react';
-import { Trash2, RefreshCw, ChevronDown, ChevronUp, AlertTriangle, CheckCircle, Clock } from 'lucide-react';
-import { clsx } from 'clsx';
-import { twMerge } from 'tailwind-merge';
+import {
+    ChevronDown, ChevronUp, Trash2, RefreshCw,
+    AlertTriangle, CheckCircle2, Clock, Loader2,
+    Shield, Droplets, Gauge, Activity, Eye
+} from 'lucide-react';
 
-function cn(...inputs) {
-    return twMerge(clsx(inputs));
+/* ─── Status Badge ─── */
+function StatusBadge({ status }) {
+    if (status === 'pending')
+        return <span className="badge-pending"><Clock size={10} /> Pending</span>;
+    if (status === 'processing')
+        return <span className="badge-processing"><Loader2 size={10} className="animate-spin" /> Analyzing</span>;
+    if (status === 'success')
+        return <span className="badge-success"><CheckCircle2 size={10} /> Complete</span>;
+    if (status === 'error')
+        return <span className="badge-error"><AlertTriangle size={10} /> Failed</span>;
+    return null;
 }
 
-// Helper for warnings
-const getWarnings = (result) => {
-    const warnings = [];
-    if (!result) return warnings;
-    if (result.metrics?.saturation_warning) warnings.push({ type: 'saturation', msg: 'Saturation Detected' });
-    if (!result.is_black_box) warnings.push({ type: 'blackbox', msg: 'Poor Conditions' });
-    return warnings;
-};
+/* ─── Metric Tile ─── */
+function MetricTile({ icon: Icon, label, value, accent, warn, danger }) {
+    const colorClass = danger
+        ? 'text-danger'
+        : warn
+            ? 'text-warn'
+            : accent
+                ? 'text-accent-glow'
+                : 'text-slate-100';
 
+    const borderClass = danger
+        ? 'border-danger/20 bg-danger-surface'
+        : warn
+            ? 'border-warn/20 bg-warn-surface'
+            : accent
+                ? 'border-accent/20 bg-accent-surface'
+                : 'border-border bg-surface-1';
+
+    return (
+        <div className={`rounded-lg border p-3 ${borderClass}`}>
+            <div className="flex items-center gap-1.5 mb-1">
+                {Icon && <Icon size={11} className="text-muted" />}
+                <span className="text-[10px] font-semibold text-muted uppercase tracking-widest">{label}</span>
+            </div>
+            <div className={`text-lg font-mono font-semibold ${colorClass} truncate`}>
+                {value ?? '—'}
+            </div>
+        </div>
+    );
+}
+
+/* ─── Queue Item Card ─── */
 export function QueueItem({ item, onRemove, onRetry, debugMode, onUpdateSettings }) {
     const [expanded, setExpanded] = useState(false);
-    const [overrideSettings, setOverrideSettings] = useState(item.overrides || {});
+    const [localOverrides, setLocalOverrides] = useState(item.overrides || {});
 
-    // Use simulated internal stats if processing not complete, else use result
-    const progressColor = item.status === 'error' ? 'bg-red-500' : item.status === 'success' ? 'bg-green-500' : 'bg-blue-500';
+    const isError = item.status === 'error';
+    const isDone = item.status === 'success';
+    const isActive = item.status === 'processing';
+    const result = item.result;
+    const metrics = result?.metrics;
 
-    const warnings = getWarnings(item.result);
-    const hasWarning = warnings.length > 0;
+    const hasSaturationWarning = metrics?.saturation_warning;
 
-    const handleSettingChange = (field, value) => {
-        const newSettings = { ...overrideSettings, [field]: value };
-        setOverrideSettings(newSettings);
-        // Propagate up if this item is done, to re-calc normalization immediately? 
-        // For now just save state. Real re-calc would need backend call or client-side math if raw is available.
-        // We will assume Re-run is needed for full re-calc if backend does normalization.
-        // Actually, optimization: if we have raw metrics, we can re-calc normalized locally!
-        // Let's rely on Re-run for simplicity ensuring consistency.
-        onUpdateSettings(item.id, newSettings);
+    const cardBorder = isError
+        ? 'border-danger/30'
+        : isDone
+            ? 'border-border hover:border-success/20'
+            : isActive
+                ? 'border-accent/30'
+                : 'border-border hover:border-border-hover';
+
+    const handleOverrideChange = (field, value) => {
+        const updated = { ...localOverrides, [field]: value };
+        setLocalOverrides(updated);
+        onUpdateSettings(item.id, updated);
     };
 
     return (
-        <div className={cn(
-            "bg-slate-900 border rounded-xl overflow-hidden transition-all duration-300",
-            expanded ? "border-blue-800 shadow-lg shadow-blue-900/10" : "border-slate-800 hover:border-slate-700"
-        )}>
-            {/* Header / Summary Row */}
-            <div className="flex items-center p-3 gap-4 cursor-pointer hover:bg-slate-800/30 transition-colors" onClick={() => setExpanded(!expanded)}>
+        <div className={`card-hover ${cardBorder} overflow-hidden`}>
+
+            {/* ─── Header Row ─── */}
+            <div
+                className="flex items-center gap-3 p-3 cursor-pointer select-none"
+                onClick={() => setExpanded(!expanded)}
+            >
                 {/* Thumbnail */}
-                <div className="w-12 h-12 rounded bg-black overflow-hidden flex-shrink-0 relative">
-                    <img src={item.preview} alt="thumb" className="w-full h-full object-cover" />
-                    {item.status === 'processing' && (
-                        <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
-                            <RefreshCw size={16} className="text-blue-400 animate-spin" />
+                <div className="w-11 h-11 rounded-lg bg-surface-0 overflow-hidden flex-shrink-0 border border-border relative">
+                    <img src={item.preview} alt="" className="w-full h-full object-cover" />
+                    {isActive && (
+                        <div className="absolute inset-0 bg-surface-0/70 flex items-center justify-center">
+                            <Loader2 size={16} className="text-accent-glow animate-spin" />
                         </div>
                     )}
                 </div>
 
-                {/* Info */}
+                {/* Name + Badge */}
                 <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
-                        <h3 className="font-medium text-slate-200 truncate">{item.file.name}</h3>
-                        {hasWarning && item.status === 'success' && (
-                            <AlertTriangle size={14} className="text-yellow-500" title="Warnings detected" />
+                    <div className="flex items-center gap-2 mb-0.5">
+                        <span className="text-sm font-medium text-slate-200 truncate">{item.file.name}</span>
+                        {hasSaturationWarning && isDone && (
+                            <AlertTriangle size={12} className="text-warn flex-shrink-0" />
                         )}
                     </div>
-                    <div className="flex items-center gap-2 text-xs mt-1">
-                        <StatusBadge status={item.status} error={item.error} />
-                        {item.status === 'success' && (
-                            <span className="text-slate-500">• Max: {item.result.metrics?.max_blue_raw?.toFixed(0)}</span>
-                        )}
-                    </div>
+                    <StatusBadge status={item.status} />
                 </div>
 
-                {/* Progress Bars for active items */}
-                {item.status === 'processing' && (
-                    <div className="w-24 h-1.5 bg-slate-800 rounded-full overflow-hidden hidden sm:block">
-                        <div className="h-full bg-blue-500 animate-pulse" style={{ width: `${item.progress}%` }}></div>
+                {/* Inline metric preview */}
+                {isDone && metrics && (
+                    <div className="hidden sm:flex items-center gap-4 mr-2">
+                        <div className="text-right">
+                            <div className="text-[10px] text-muted uppercase tracking-wider">Raw</div>
+                            <div className="text-sm font-mono font-semibold text-slate-200">{metrics.max_blue_raw?.toFixed(0)}</div>
+                        </div>
+                        <div className="text-right">
+                            <div className="text-[10px] text-muted uppercase tracking-wider">Norm</div>
+                            <div className="text-sm font-mono font-semibold text-accent-glow">
+                                {metrics.normalized_intensity != null ? metrics.normalized_intensity.toFixed(4) : '—'}
+                            </div>
+                        </div>
                     </div>
                 )}
 
                 {/* Actions */}
-                <div className="flex items-center gap-2" onClick={e => e.stopPropagation()}>
-                    {item.status === 'error' || item.status === 'success' ? (
-                        <button onClick={() => onRetry(item.id)} className="p-2 text-slate-500 hover:text-blue-400 hover:bg-slate-800 rounded-lg" title="Re-run">
-                            <RefreshCw size={18} />
+                <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                    {(isError || isDone) && (
+                        <button onClick={() => onRetry(item.id)} className="btn-icon" title="Re-run">
+                            <RefreshCw size={15} />
                         </button>
-                    ) : null}
-                    <button onClick={() => onRemove(item.id)} className="p-2 text-slate-500 hover:text-red-400 hover:bg-slate-800 rounded-lg" title="Remove">
-                        <Trash2 size={18} />
+                    )}
+                    <button onClick={() => onRemove(item.id)} className="btn-icon hover:!text-danger" title="Remove">
+                        <Trash2 size={15} />
                     </button>
-                    <button onClick={() => setExpanded(!expanded)} className="p-2 text-slate-500 hover:text-slate-300 rounded-lg">
-                        {expanded ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
+                    <button onClick={() => setExpanded(!expanded)} className="btn-icon">
+                        {expanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
                     </button>
                 </div>
             </div>
 
-            {/* Progress Line (bottom of header) */}
-            {item.status === 'processing' && (
-                <div className="h-0.5 bg-slate-800 w-full">
-                    <div className="h-full bg-blue-500 transition-all duration-300" style={{ width: `${item.progress}%` }}></div>
+            {/* ─── Progress Bar ─── */}
+            {isActive && (
+                <div className="px-3 pb-2">
+                    <div className="progress-track">
+                        <div
+                            className="progress-fill bg-accent"
+                            style={{ width: `${item.progress}%` }}
+                        />
+                    </div>
                 </div>
             )}
 
-
-            {/* Expanded Details */}
+            {/* ─── Expanded Details ─── */}
             {expanded && (
-                <div className="border-t border-slate-800 bg-slate-950/30 p-4 animate-in fade-in slide-in-from-top-2 duration-200">
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <div className="border-t border-border bg-surface-1/50 p-4 space-y-4">
 
-                        {/* 1. Large Preview */}
-                        <div className="relative group rounded-lg overflow-hidden border border-slate-800 bg-black min-h-[200px] flex items-center justify-center">
-                            <img src={item.preview} className="max-w-full max-h-[300px] object-contain" />
-                            {/* Debug Overlay */}
-                            {debugMode && item.result?.debug_image && (
-                                <div className="absolute inset-0 bg-black/0 hover:bg-black/10 transition-all flex items-center justify-center pointer-events-none">
-                                    <img src={item.result.debug_image} className="absolute inset-0 w-full h-full object-contain opacity-60 mix-blend-screen" />
-                                    <div className="absolute bottom-2 right-2 bg-black/70 text-[10px] text-green-400 px-2 py-0.5 rounded border border-green-900/50">MASK OVERLAY</div>
+                    <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
+
+                        {/* Preview (2 cols) */}
+                        <div className="md:col-span-2 relative rounded-lg overflow-hidden bg-surface-0 border border-border min-h-[180px] flex items-center justify-center">
+                            <img src={item.preview} className="max-w-full max-h-[280px] object-contain" alt="" />
+                            {debugMode && result?.debug_image && (
+                                <div className="absolute inset-0 flex items-center justify-center">
+                                    <img src={result.debug_image} className="absolute inset-0 w-full h-full object-contain opacity-50 mix-blend-screen" alt="" />
+                                    <div className="absolute bottom-2 right-2 badge-processing !text-[9px]">
+                                        <Eye size={9} /> Mask Overlay
+                                    </div>
                                 </div>
                             )}
-                            {item.status === 'error' && (
-                                <div className="absolute inset-0 flex items-center justify-center bg-black/50 text-red-400 text-sm font-medium">
-                                    Analysis Failed
+                            {isError && (
+                                <div className="absolute inset-0 bg-surface-0/60 flex items-center justify-center">
+                                    <span className="text-danger text-sm font-medium">Analysis Failed</span>
                                 </div>
                             )}
                         </div>
 
-                        {/* 2. Metrics & Data */}
-                        <div className="col-span-2 space-y-4">
+                        {/* Metrics (3 cols) */}
+                        <div className="md:col-span-3 space-y-3">
 
-                            {/* Overrides */}
-                            <div className="bg-slate-900/50 p-3 rounded-lg border border-slate-800 flex gap-4 items-center">
-                                <span className="text-xs font-bold text-slate-500 uppercase">Input Params</span>
-                                <div className="flex gap-2">
-                                    <input
-                                        type="number"
-                                        placeholder="Time"
-                                        className="bg-slate-950 border border-slate-700 rounded px-2 py-1 w-20 text-xs text-slate-300"
-                                        value={overrideSettings.t || item.globalSettingsUsed?.t || ''}
-                                        onChange={(e) => handleSettingChange('t', e.target.value)}
-                                    />
-                                    <input
-                                        type="number"
-                                        placeholder="ISO"
-                                        className="bg-slate-950 border border-slate-700 rounded px-2 py-1 w-20 text-xs text-slate-300"
-                                        value={overrideSettings.iso || item.globalSettingsUsed?.iso || ''}
-                                        onChange={(e) => handleSettingChange('iso', e.target.value)}
-                                    />
+                            {/* Error message */}
+                            {isError && (
+                                <div className="rounded-lg border border-danger/20 bg-danger-surface p-3">
+                                    <div className="flex items-start gap-2">
+                                        <AlertTriangle size={14} className="text-danger mt-0.5 flex-shrink-0" />
+                                        <div>
+                                            <div className="text-sm font-medium text-danger">{item.error}</div>
+                                            {result?.debug_info && (
+                                                <div className="text-xs text-muted mt-1 font-mono">
+                                                    Dark: {(result.debug_info.percent_near_black * 100).toFixed(1)}% · Bright: {(result.debug_info.bright_area_ratio * 100).toFixed(1)}%
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
                                 </div>
-                                <button
-                                    className="text-xs text-blue-400 hover:text-blue-300 hover:underline ml-auto"
-                                    onClick={() => onRetry(item.id)}
-                                >
-                                    Re-calculate
-                                </button>
-                            </div>
+                            )}
 
                             {/* Metrics Grid */}
-                            {item.status === 'success' && item.result && (
-                                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                                    <MetricTile label="Black Box" val={item.result.is_black_box ? "PASS" : "FAIL"} status={item.result.is_black_box ? "good" : "bad"} />
-                                    <MetricTile label="Blue Glow" val={item.result.blue_detected ? "FOUND" : "NONE"} status={item.result.blue_detected ? "good" : "bad"} />
-                                    <MetricTile label="Max Raw" val={item.result.metrics.max_blue_raw?.toFixed(0)} />
-                                    <MetricTile label="Normalized" val={item.result.metrics.normalized_intensity?.toFixed(2)} active />
+                            {isDone && metrics && (
+                                <div className="grid grid-cols-2 gap-2">
+                                    <MetricTile
+                                        icon={Shield} label="Black Box"
+                                        value={result.is_black_box ? '✓ PASS' : '✗ FAIL'}
+                                        danger={!result.is_black_box}
+                                    />
+                                    <MetricTile
+                                        icon={Droplets} label="Blue Glow"
+                                        value={result.blue_detected ? '✓ FOUND' : '✗ NONE'}
+                                        danger={!result.blue_detected}
+                                    />
+                                    <MetricTile
+                                        icon={Gauge} label="Max Raw"
+                                        value={metrics.max_blue_raw?.toFixed(0)}
+                                    />
+                                    <MetricTile
+                                        icon={Activity} label="Normalized"
+                                        value={metrics.normalized_intensity != null ? metrics.normalized_intensity.toFixed(4) : 'N/A'}
+                                        accent
+                                    />
                                 </div>
                             )}
 
-                            {/* Detailed Logs/Errors */}
-                            {(item.status === 'error' || warnings.length > 0) && (
-                                <div className="bg-slate-900 p-3 rounded border border-slate-800 text-xs font-mono">
-                                    {item.status === 'error' && (
-                                        <div className="text-red-400 mb-2">Error: {item.error}</div>
-                                    )}
-                                    {warnings.map((w, idx) => (
-                                        <div key={idx} className="text-yellow-500 flex items-center gap-2">
-                                            <AlertTriangle size={12} /> {w.msg}
-                                        </div>
-                                    ))}
-                                    {debugMode && item.result?.debug_info && (
-                                        <div className="mt-2 pt-2 border-t border-slate-800 text-slate-500">
-                                            {JSON.stringify(item.result.debug_info)}
-                                        </div>
-                                    )}
+                            {/* Warnings */}
+                            {isDone && hasSaturationWarning && (
+                                <div className="rounded-lg border border-warn/20 bg-warn-surface p-2.5 flex items-center gap-2">
+                                    <AlertTriangle size={13} className="text-warn flex-shrink-0" />
+                                    <span className="text-xs text-warn">Saturation detected — intensity may be underestimated ({(metrics.saturation_ratio * 100).toFixed(1)}% clipped)</span>
                                 </div>
                             )}
 
+                            {/* Debug Info */}
+                            {debugMode && result?.debug_info && (
+                                <div className="rounded-lg border border-border bg-surface-0 p-2.5">
+                                    <div className="text-[10px] text-muted uppercase tracking-widest mb-1">Debug</div>
+                                    <div className="text-xs font-mono text-muted-dim leading-relaxed">
+                                        {JSON.stringify(result.debug_info, null, 2)}
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Per-Image Overrides */}
+                            {(isDone || isError) && (
+                                <div className="rounded-lg border border-border bg-surface-0 p-3">
+                                    <div className="flex items-center justify-between mb-2">
+                                        <span className="text-[10px] text-muted uppercase tracking-widest font-semibold">Override Params</span>
+                                        <button
+                                            onClick={() => onRetry(item.id)}
+                                            className="text-[11px] text-accent hover:text-accent-glow transition-colors font-medium"
+                                        >
+                                            Re-calculate →
+                                        </button>
+                                    </div>
+                                    <div className="flex gap-2">
+                                        <input
+                                            type="number"
+                                            placeholder="Time (s)"
+                                            className="input-field !py-1.5 !text-xs"
+                                            value={localOverrides.t || ''}
+                                            onChange={(e) => handleOverrideChange('t', e.target.value)}
+                                        />
+                                        <input
+                                            type="number"
+                                            placeholder="ISO"
+                                            className="input-field !py-1.5 !text-xs"
+                                            value={localOverrides.iso || ''}
+                                            onChange={(e) => handleOverrideChange('iso', e.target.value)}
+                                        />
+                                    </div>
+                                </div>
+                            )}
                         </div>
                     </div>
                 </div>
             )}
         </div>
     );
-}
-
-function StatusBadge({ status, error }) {
-    if (status === 'pending') return <span className="text-slate-500 flex items-center gap-1"><Clock size={12} /> Pending</span>;
-    if (status === 'processing') return <span className="text-blue-400 flex items-center gap-1"><RefreshCw size={12} className="animate-spin" /> Analyzing...</span>;
-    if (status === 'success') return <span className="text-green-500 flex items-center gap-1"><CheckCircle size={12} /> Complete</span>;
-    if (status === 'error') return <span className="text-red-400 flex items-center gap-1"><AlertTriangle size={12} /> Failed</span>;
-    return null;
-}
-
-function MetricTile({ label, val, status, active }) {
-    const isGood = status === 'good';
-    const isBad = status === 'bad';
-    return (
-        <div className={cn(
-            "p-3 rounded-lg border flex flex-col justify-center",
-            active ? "bg-blue-950/20 border-blue-500/30" : "bg-slate-900 border-slate-800",
-            isBad ? "border-red-900/50 bg-red-950/10" : ""
-        )}>
-            <span className="text-[10px] text-slate-500 uppercase tracking-widest mb-1">{label}</span>
-            <span className={cn(
-                "text-xl font-mono font-medium",
-                active ? "text-blue-400" : "text-slate-300",
-                isGood ? "text-green-400" : "",
-                isBad ? "text-red-400" : ""
-            )}>{val}</span>
-        </div>
-    )
 }
