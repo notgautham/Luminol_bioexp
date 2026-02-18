@@ -3,4 +3,6 @@ uvicorn
 python-multipart
 opencv-python-headless
 numpy
+scipy
 pillow
+rawpy

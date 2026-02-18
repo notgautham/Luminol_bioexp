@@ -1,218 +1,448 @@
+"""
+Luminol Blue Intensity Analyzer — Processing Pipeline
+=====================================================
+Single public entry point: analyze_image()
+
+Why mean/integrated metrics instead of max:
+  In most luminol images the peak blue channel clips at 255 (sRGB → ~1.0
+  linear).  With constant shutter/ISO a max-based normalised intensity is
+  identical across images.  Mean and integrated intensity inside a
+  brightness-percentile "core glow" region are far more discriminative.
+
+Blue scoring uses a single adaptive blue_score method:
+  blue_score = B_lin − max(R_lin, G_lin)
+  thresholded at the 99th percentile of blue_score, then cleaned.
+  This is NOT a gate — dim samples are never rejected.
+
+Spill suppression uses a single percentile-cutoff approach:
+  P = 70 + 0.28 * sensitivity   (sens 0 → 70th pctl, sens 100 → 98th)
+  core_mask = mask0 pixels where B_lin ≥ percentile(B_lin in mask0, P)
+"""
+
 import cv2
 import numpy as np
 import base64
+from scipy import ndimage
 
-# --- Parameters & Thresholds ---
-# User can tune these if needed.
+# ── Attempt rawpy import (optional — only needed for RAW/DNG mode) ────
+try:
+    import rawpy
+    HAS_RAWPY = True
+except ImportError:
+    HAS_RAWPY = False
 
-# Black Box Detection
-LINEAR_DARK_THRESHOLD = 0.05    # Pixels darker than this (in linear 0-1) are "dark"
-LINEAR_BRIGHT_THRESHOLD = 0.4   # Pixels brighter than this are "bright"
-BB_MIN_DARK_RATIO = 0.80        # At least 80% of pixels must be dark
-BB_MAX_BRIGHT_RATIO = 0.25      # At most 25% of pixels can be bright (prevents bright ambient scenes)
+# ─── Constants ────────────────────────────────────────────────────────
+# Black-box detection (linear space)
+LINEAR_DARK_THRESHOLD   = 0.05
+LINEAR_BRIGHT_THRESHOLD = 0.40
+BB_MIN_DARK_RATIO       = 0.80
+BB_MAX_BRIGHT_RATIO     = 0.25
 
-# Blue Detection
-# OpenCV HSV ranges: H (0-179), S (0-255), V (0-255)
-# User request: 190-260 degrees -> 95-130 in OpenCV
-BLUE_H_MIN = 90  # Slightly generous lower bound (Cyan/Blue boundary is ~90)
-BLUE_H_MAX = 135 # Slightly generous upper bound (Blue/Violet boundary)
-BLUE_S_MIN = 40  # Avoid white/gray
-BLUE_V_MIN = 20  # Avoid absolute black
+# Minimum pixel counts
+MIN_BLUE_AREA_PX        = 50
 
-# Channel Dominance (Linear Space)
-# B > G * k1 AND B > R * k2
-BLUE_DOM_G_FACTOR = 1.1 
-BLUE_DOM_R_FACTOR = 1.3
+# DNG / RAW magic-byte signatures
+_DNG_TIFF_LE = b'\x49\x49\x2a\x00'   # Little-endian TIFF (DNG uses TIFF container)
+_DNG_TIFF_BE = b'\x4d\x4d\x00\x2a'   # Big-endian TIFF
 
-MIN_BLUE_AREA_PX = 50   # Minimum pixels to count as detection
+# JPEG signatures
+_JPEG_SOI    = b'\xff\xd8\xff'
 
-def srgb_to_linear(img_srgb_norm):
+
+# ──────────────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────────────
+
+def srgb_to_linear(img_norm):
+    """sRGB [0-1] → Linear [0-1] (IEC 61966-2-1)."""
+    mask = img_norm <= 0.04045
+    out = np.empty_like(img_norm)
+    out[mask]  = img_norm[mask] / 12.92
+    out[~mask] = np.power((img_norm[~mask] + 0.055) / 1.055, 2.4)
+    return out
+
+
+def _is_raw_file(data: bytes) -> bool:
+    """Heuristic: check if bytes look like a TIFF/DNG container."""
+    return data[:4] in (_DNG_TIFF_LE, _DNG_TIFF_BE)
+
+
+def _is_jpeg_file(data: bytes) -> bool:
+    return data[:3] == _JPEG_SOI
+
+
+def _decode_raw(image_bytes: bytes):
     """
-    Convert sRGB (0-1) to Linear (0-1).
-    Formula:
-    if c <= 0.04045: c / 12.92
-    else: ((c + 0.055) / 1.055) ^ 2.4
+    Decode RAW/DNG → linear float32 RGB [0-1].
+    Returns (img_linear, bit_depth).
     """
-    mask_small = img_srgb_norm <= 0.04045
-    img_linear = np.empty_like(img_srgb_norm)
-    img_linear[mask_small] = img_srgb_norm[mask_small] / 12.92
-    img_linear[~mask_small] = np.power((img_srgb_norm[~mask_small] + 0.055) / 1.055, 2.4)
-    return img_linear
+    if not HAS_RAWPY:
+        return None, None
+    try:
+        import io
+        raw = rawpy.imread(io.BytesIO(image_bytes))
+        # postprocess: linear, no gamma, no white balance auto
+        rgb16 = raw.postprocess(
+            output_bps=16,
+            no_auto_bright=True,
+            use_camera_wb=True,
+            gamma=(1, 1),          # linear output
+            output_color=rawpy.ColorSpace.sRGB,
+        )
+        bit_depth = 16
+        img_linear = rgb16.astype(np.float32) / 65535.0
+        return img_linear, bit_depth
+    except Exception:
+        return None, None
 
-def analyze_image(image_bytes, exposure_time, iso):
-    # --- Step A: Load & Decode ---
+
+def _decode_jpeg(image_bytes: bytes):
+    """
+    Decode JPEG/PNG/TIFF (processed) → linear float32 RGB [0-1].
+    Applies sRGB → linear gamma correction.
+    Returns (img_linear, img_bgr_8bit).
+    """
     nparr = np.frombuffer(image_bytes, np.uint8)
     img_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    
     if img_bgr is None:
-        raise ValueError("Could not decode image")
-        
-    # Convert to RGB (for consistent logic)
+        return None, None
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    
-    # Create Normalized sRGB (0-1) for calculations
-    img_srgb_norm = img_rgb.astype(np.float32) / 255.0
-    
-    # Create Linear RGB (0-1)
-    img_linear = srgb_to_linear(img_srgb_norm)
+    img_norm = img_rgb.astype(np.float32) / 255.0
+    img_linear = srgb_to_linear(img_norm)
+    return img_linear, img_bgr
 
-    # --- Step B: Denoise ---
-    # Mild denoise on BGR 8-bit for heuristics, preserving edges
-    # 'fastNlMeansDenoisingColored' is good but slow. 
-    # For speed on large batches, GaussianBlur or MedianBlur on high-res might be preferred,
-    # but let's stick to mild NLMeans with lower parameters for quality/speed balance.
-    # strength=3 is very mild.
-    img_bgr_denoised = cv2.fastNlMeansDenoisingColored(img_bgr, None, 3, 3, 7, 21)
-    img_rgb_denoised = cv2.cvtColor(img_bgr_denoised, cv2.COLOR_BGR2RGB)
-    
-    # Re-calculate linear from denoised? 
-    # Technically "correct" is denoise raw -> linear, but we don't have raw.
-    # We'll use the denoised 8-bit for Masks/Heuristics and the original Linear for intensity stats 
-    # (or denoised linear if noise is bad, let's use denoised linear to be safe against salt/pepper).
-    img_srgb_denoised_norm = img_rgb_denoised.astype(np.float32) / 255.0
-    img_linear_denoised = srgb_to_linear(img_srgb_denoised_norm)
 
-    # --- Step C: Black Box Detection ---
-    # Calculate luminance in linear space (Rec. 709 coefficients aprox: 0.2126 R + 0.7152 G + 0.0722 B)
-    # or just simple mean for approximate "brightness" check.
-    # Luminance Y = 0.2126 R + 0.7152 G + 0.0722 B
-    lum_linear = (0.2126 * img_linear_denoised[:,:,0] + 
-                  0.7152 * img_linear_denoised[:,:,1] + 
-                  0.0722 * img_linear_denoised[:,:,2])
-    
-    total_pixels = lum_linear.size
-    count_near_black = np.sum(lum_linear < LINEAR_DARK_THRESHOLD)
-    count_bright = np.sum(lum_linear > LINEAR_BRIGHT_THRESHOLD)
-    
-    percent_near_black = count_near_black / total_pixels
-    bright_area_ratio = count_bright / total_pixels
-    
-    is_black_box = (percent_near_black > BB_MIN_DARK_RATIO) and (bright_area_ratio < BB_MAX_BRIGHT_RATIO)
-    
+def _keep_best_component_by_sum(mask, score_map, min_area=50):
+    """
+    Keep the connected component with the highest integrated score energy.
+
+    Unlike selecting the component containing the single brightest pixel,
+    this is robust to specular highlights on glass (which are bright but tiny
+    and have low total energy compared to a diffuse glow region).
+
+    Additionally, thin streak-like components (aspect ratio > 8 and area < 2000 px)
+    are skipped, as they are characteristic of edge reflections rather than glow blobs.
+
+    Parameters
+    ----------
+    mask      : uint8 binary mask (255 = foreground).
+    score_map : float array, same shape as mask. Negative values are clamped to 0.
+    min_area  : components smaller than this are ignored.
+    """
+    labelled, n = ndimage.label(mask > 0)
+    if n == 0:
+        return mask
+    if n == 1:
+        return mask
+
+    score_pos = np.maximum(score_map, 0.0)
+    best_label = -1
+    best_sum   = -1.0
+
+    for lbl in range(1, n + 1):
+        comp = labelled == lbl
+        area = int(np.sum(comp))
+        if area < min_area:
+            continue
+
+        # Shape sanity: skip thin streaks (specular edge reflections)
+        rows = np.any(comp, axis=1)
+        cols = np.any(comp, axis=0)
+        h_span = int(np.sum(rows))
+        w_span = int(np.sum(cols))
+        if h_span > 0 and w_span > 0:
+            aspect = max(h_span, w_span) / max(min(h_span, w_span), 1)
+            if aspect > 8 and area < 2000:
+                continue  # likely a thin edge reflection
+
+        energy = float(np.sum(score_pos[comp]))
+        if energy > best_sum:
+            best_sum   = energy
+            best_label = lbl
+
+    if best_label < 0:
+        # All components were filtered — fall back to returning the original mask
+        return mask
+
+    return ((labelled == best_label) * 255).astype(np.uint8)
+
+
+def _build_overlay_png(core_mask, shape_hw):
+    """
+    Create a transparent RGBA overlay highlighting the core_mask.
+    - Cyan fill (0, 220, 220, 90) inside core
+    - Green contour lines (0, 255, 0, 200)
+    Returns base64-encoded PNG with data URI prefix.
+    """
+    h, w = shape_hw
+    overlay = np.zeros((h, w, 4), dtype=np.uint8)
+
+    # Semi-transparent cyan fill
+    overlay[core_mask == 255] = [0, 220, 220, 90]
+
+    # Green contour
+    contours, _ = cv2.findContours(core_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cv2.drawContours(overlay, contours, -1, (0, 255, 0, 200), 2)
+
+    _, enc = cv2.imencode(".png", overlay)
+    return "data:image/png;base64," + base64.b64encode(enc).decode("utf-8")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# PUBLIC ENTRY POINT
+# ──────────────────────────────────────────────────────────────────────
+
+def analyze_image(
+    image_bytes: bytes,
+    shutter_seconds: float,
+    iso: float,
+    sensitivity: float = 50,
+    capture_mode: str = "jpeg",
+):
+    """
+    Analyse a luminol chemiluminescence image.
+
+    Parameters
+    ----------
+    image_bytes    : Raw file bytes.
+    shutter_seconds: Shutter speed in seconds (e.g. 0.0167 for 1/60).
+    iso            : Camera ISO.
+    sensitivity    : Core-mask strictness 0-100.  Higher = stricter.
+    capture_mode   : "jpeg" or "raw".
+
+    Returns
+    -------
+    dict  JSON-serialisable result.
+    """
+    sensitivity = max(0, min(100, float(sensitivity)))
+
+    # ══════════════════════════════════════════════════════════════════
+    # A.  DECODE + MODE MISMATCH CHECK
+    # ══════════════════════════════════════════════════════════════════
+    is_raw_data  = _is_raw_file(image_bytes)
+    is_jpeg_data = _is_jpeg_file(image_bytes)
+
+    img_bgr_8bit = None  # only available in jpeg path
+
+    if capture_mode == "raw":
+        # Expect RAW/DNG data
+        if is_jpeg_data and not is_raw_data:
+            return _error("MODE_MISMATCH",
+                          "JPEG/PNG file uploaded but RAW mode is selected. "
+                          "Switch to JPEG mode or upload a DNG/RAW file.")
+        img_linear, bit_depth = _decode_raw(image_bytes)
+        if img_linear is None:
+            # Maybe rawpy not installed or decode failed
+            if not HAS_RAWPY:
+                return _error("RAW_DECODE_FAIL",
+                              "rawpy is not installed. Install it with: pip install rawpy")
+            return _error("RAW_DECODE_FAIL",
+                          "Failed to decode RAW/DNG file.")
+        sat_threshold_linear = 0.98   # near-max in linear 16-bit
+        jpeg_caveat = False
+
+    else:  # capture_mode == "jpeg"
+        if is_raw_data and not is_jpeg_data:
+            return _error("MODE_MISMATCH",
+                          "RAW/DNG file uploaded but JPEG mode is selected. "
+                          "Switch to RAW mode or upload a JPEG file.")
+        img_linear, img_bgr_8bit = _decode_jpeg(image_bytes)
+        if img_linear is None:
+            raise ValueError("Could not decode image")
+        sat_threshold_linear = srgb_to_linear(np.array([250/255.0], dtype=np.float32))[0]
+        jpeg_caveat = True
+
+    h, w = img_linear.shape[:2]
+
+    # ══════════════════════════════════════════════════════════════════
+    # B.  MILD DENOISE (on linear data)
+    # ══════════════════════════════════════════════════════════════════
+    # For jpeg path we can denoise the 8-bit then re-linearise.
+    # For raw path we do a mild bilateral on the float data.
+    if img_bgr_8bit is not None:
+        dn_bgr = cv2.fastNlMeansDenoisingColored(img_bgr_8bit, None, 3, 3, 7, 21)
+        dn_rgb = cv2.cvtColor(dn_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        img_linear_dn = srgb_to_linear(dn_rgb)
+    else:
+        # RAW path: simple gaussian blur as mild denoise on float
+        img_linear_dn = cv2.GaussianBlur(img_linear, (5, 5), 0.8)
+
+    # ══════════════════════════════════════════════════════════════════
+    # C.  BLACK-BOX CHECK
+    # ══════════════════════════════════════════════════════════════════
+    lum = (0.2126 * img_linear_dn[:, :, 0]
+         + 0.7152 * img_linear_dn[:, :, 1]
+         + 0.0722 * img_linear_dn[:, :, 2])
+
+    total_px   = lum.size
+    pct_dark   = float(np.sum(lum < LINEAR_DARK_THRESHOLD) / total_px)
+    pct_bright = float(np.sum(lum > LINEAR_BRIGHT_THRESHOLD) / total_px)
+    is_black_box = (pct_dark > BB_MIN_DARK_RATIO) and (pct_bright < BB_MAX_BRIGHT_RATIO)
+
     bb_debug = {
-        "percent_near_black": float(percent_near_black),
-        "bright_area_ratio": float(bright_area_ratio),
-        "is_black_box": bool(is_black_box)
+        "percent_near_black": pct_dark,
+        "bright_area_ratio":  pct_bright,
+        "is_black_box":       is_black_box,
     }
 
     if not is_black_box:
         return {
-            "status": "error",
-            "error_type": "BLACKBOX_NOT_DETECTED", 
-            "message": "Sample not detected / Surrounding conditions not ideal (Black box check failed).",
-            "debug_info": bb_debug,
-            "metrics": {},
-            "debug_image": None
+            "status":      "error",
+            "error_type":  "BLACKBOX_NOT_DETECTED",
+            "message":     "Black box not detected — surrounding conditions not ideal.",
+            "debug_info":  bb_debug,
+            "metrics":     {},
+            "debug_image": None,
+            "overlay_png_base64": None,
+            "capture_mode": capture_mode,
         }
 
-    # --- Step D: Blue Glow Detection ---
-    # 1. HSV Mask (on Denoised 8-bit)
-    img_hsv = cv2.cvtColor(img_bgr_denoised, cv2.COLOR_BGR2HSV)
-    lower_blue = np.array([BLUE_H_MIN, BLUE_S_MIN, BLUE_V_MIN])
-    upper_blue = np.array([BLUE_H_MAX, 255, 255])
-    mask_hsv = cv2.inRange(img_hsv, lower_blue, upper_blue)
-    
-    # 2. Linear Channel Dominance Mask
-    # Extract channels from Linear Denoised
-    R_lin = img_linear_denoised[:,:,0]
-    G_lin = img_linear_denoised[:,:,1]
-    B_lin = img_linear_denoised[:,:,2]
-    
-    mask_dominance = (B_lin > (G_lin * BLUE_DOM_G_FACTOR)) & (B_lin > (R_lin * BLUE_DOM_R_FACTOR))
-    mask_dominance_uint8 = (mask_dominance * 255).astype(np.uint8)
-    
-    # Combine Masks (Intersection)
-    # We require BOTH correct Hue AND Blue Dominance to avoid purple/cyan noise artifacting?
-    # Or maybe Union? User said "intersection/union strategy (document choice)".
-    # Intersection is safer for "pure blue".
-    final_mask = cv2.bitwise_and(mask_hsv, mask_dominance_uint8)
-    
-    # Morphological Cleanup
-    kernel = np.ones((3,3), np.uint8)
-    final_mask = cv2.morphologyEx(final_mask, cv2.MORPH_OPEN, kernel)
-    
-    # Connected Components to remove tiny specks
-    # (Optional vs just area check) -> Let's count total pixels first.
-    blue_area_px = cv2.countNonZero(final_mask)
-    
-    blue_detected = blue_area_px > MIN_BLUE_AREA_PX
-    
-    if not blue_detected:
-         return {
-            "status": "error",
-            "error_type": "BLUE_NOT_DETECTED",
-            "message": "Blue light not detected.",
-            "debug_info": {**bb_debug, "blue_area_px": int(blue_area_px)},
-            "metrics": {},
-            "debug_image": None
-        }
+    # ══════════════════════════════════════════════════════════════════
+    # D.  BLUE REGION — all pixels where blue is dominant
+    # ══════════════════════════════════════════════════════════════════
+    R = img_linear_dn[:, :, 0]
+    G = img_linear_dn[:, :, 1]
+    B = img_linear_dn[:, :, 2]
 
-    # --- Step E: Compute Intensity Metrics ---
-    # We compute metrics ONLY within the mask.
-    
-    # maxBlueRaw: Max of B channel in sRGB (0-255)
-    # We use the ORIGINAL sRGB image (img_bgr) or Denoised?
-    # User said "Step E ... maxBlueRaw = max(B channel in sRGB within mask)".
-    # Using denoised reduces outlier single-pixel noise which is good for "Max".
-    # Using original might capture true peak.
-    # Let's use PRE-DENOISED (Original) for intensity to be scientifically rigorous about what the camera saw?
-    # Actually, single pixel hot pixels are bad. Denoised is safer for "Max".
-    # Let's use Denoised for now, or maybe a median.
-    # Img_bgr_denoised is available.
-    
-    b_channel_srgb = img_bgr_denoised[:,:,0] # BGR -> B is 0
-    min_val, max_val_raw, min_loc, max_loc = cv2.minMaxLoc(b_channel_srgb, mask=final_mask)
-    
-    # maxBlueLinear: Max of B channel in Linear
-    # We can mask the linear B channel
-    b_linear_masked = B_lin[final_mask == 255]
-    if b_linear_masked.size > 0:
-        max_val_linear = np.max(b_linear_masked)
-    else:
-        max_val_linear = 0.0
-        
-    # Saturation Ratio
-    # Fraction of masked pixels with B_raw >= 250
-    # Use original image for saturation check to catch clipping before denoise
-    b_channel_original = img_bgr[:,:,0]
-    saturated_pixels = cv2.countNonZero(((b_channel_original >= 250) & (final_mask == 255)).astype(np.uint8))
-    saturation_ratio = saturated_pixels / blue_area_px if blue_area_px > 0 else 0
+    # Noise floor: ignore pixels that are essentially black
+    noise_floor = 0.002
 
-    # --- Step F: Normalization ---
-    # Formula: maxBlueLinear / (t * (iso/100))
-    t = float(exposure_time) if exposure_time else 0
-    iso_val = float(iso) if iso else 0
-    
-    if t > 0 and iso_val > 0:
-        normalized_intensity = max_val_linear / (t * (iso_val / 100.0))
+    # Blue mask: every pixel where blue channel exceeds both red and green
+    # and is above the noise floor.  No component selection — we keep ALL
+    # blue-dominant pixels across the whole image.
+    blue_mask = ((B > R) & (B > G) & (B > noise_floor)).astype(np.uint8) * 255
+
+    blue_area = int(cv2.countNonZero(blue_mask))
+    blue_detected = blue_area > MIN_BLUE_AREA_PX
+
+    # ══════════════════════════════════════════════════════════════════
+    # E.  SENSITIVITY SLIDER — simple brightness cutoff
+    #     slider=0  → keep all blue pixels (no cutoff)
+    #     slider=100 → keep only the top 1% brightest blue pixels
+    # ══════════════════════════════════════════════════════════════════
+    b_in_blue = B[blue_mask == 255]
+
+    if b_in_blue.size > 0 and sensitivity > 0:
+        # Map slider 0-100 → percentile 0-99 of the blue region's brightness
+        cutoff_pct = sensitivity * 0.99          # 0→0th pctl, 100→99th pctl
+        cutoff = float(np.percentile(b_in_blue, cutoff_pct))
+        core_mask = ((blue_mask == 255) & (B >= cutoff)).astype(np.uint8) * 255
     else:
-        normalized_intensity = None
-        
-    # --- Step G: Final Output ---
+        core_mask = blue_mask.copy()             # slider=0: keep everything
+
+    core_area = int(cv2.countNonZero(core_mask))
+
+    # ══════════════════════════════════════════════════════════════════
+    # F.  METRICS — computed inside core_mask in linear space
+    # ══════════════════════════════════════════════════════════════════
+    b_core = B[core_mask == 255]
+
+    mean_lin   = float(np.mean(b_core))               if b_core.size > 0 else 0.0
+    integ_lin  = float(np.sum(b_core))                 if b_core.size > 0 else 0.0
+    max_lin    = float(np.max(b_core))                 if b_core.size > 0 else 0.0
+    p99_5_lin  = float(np.percentile(b_core, 99.5))    if b_core.size > 0 else 0.0
+
+    # Saturation ratio (bit-depth aware)
+    if b_core.size > 0:
+        sat_count  = int(np.sum(b_core >= sat_threshold_linear))
+        sat_ratio  = float(sat_count / core_area) if core_area > 0 else 0.0
+    else:
+        sat_count  = 0
+        sat_ratio  = 0.0
+
+    # Legacy max_blue_raw (8-bit B channel in sRGB — only valid for jpeg path)
+    if img_bgr_8bit is not None and core_area > 0:
+        _, max_raw, _, _ = cv2.minMaxLoc(img_bgr_8bit[:, :, 0], mask=core_mask)
+        max_raw = float(max_raw)
+    else:
+        max_raw = float(max_lin * 255)  # approximate for RAW or empty core
+
+    # ── Normalisation ─────────────────────────────────────────────────
+    t   = float(shutter_seconds) if shutter_seconds else 0.0
+    iso_v = float(iso) if iso else 0.0
+    denom = t * (iso_v / 100.0) if (t > 0 and iso_v > 0) else 0.0
+
+    mean_norm   = float(mean_lin  / denom) if denom > 0 else None
+    integ_norm  = float(integ_lin / denom) if denom > 0 else None
+    max_norm    = float(max_lin   / denom) if denom > 0 else None
+
+    # ══════════════════════════════════════════════════════════════════
+    # G.  BUILD RESPONSE
+    # ══════════════════════════════════════════════════════════════════
     metrics = {
-        "max_blue_raw": float(max_val_raw),
-        "max_blue_linear": float(max_val_linear),
-        "normalized_intensity": float(normalized_intensity) if normalized_intensity is not None else None,
-        "blue_mask_area_px": int(blue_area_px),
-        "saturation_ratio": float(saturation_ratio),
-        "saturation_warning": saturation_ratio > 0.05
+        # ── Primary (new) ──
+        "mean_linear_core":         mean_lin,
+        "integrated_linear_core":   integ_lin,
+        "core_area_px":             core_area,
+        "max_linear_core":          max_lin,
+        "p99_5_linear_core":        p99_5_lin,
+        "mean_norm":                mean_norm,
+        "integrated_norm":          integ_norm,
+        "max_norm":                 max_norm,
+        "saturation_ratio":         sat_ratio,
+        "saturation_warning":       sat_ratio > 0.05,
+
+        # ── Legacy (backward compat — kept for frontend) ──
+        "mean_blue_linear_core":       mean_lin,
+        "p95_blue_linear_core":        p99_5_lin,
+        "integrated_blue_linear_core": integ_lin,
+        "max_blue_raw":                max_raw,
+        "max_blue_linear":             max_lin,
+        "normalized_intensity":        mean_norm,
+        "blue_mask_area_px":           blue_area,
     }
-    
-    # Debug Image Generation
-    # Overlay green contour on original denoised
-    contours, _ = cv2.findContours(final_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    debug_vis = img_bgr_denoised.copy()
+
+    # ── Warnings list ─────────────────────────────────────────────────
+    warnings = []
+    if sat_ratio > 0.05:
+        warnings.append("Saturation detected; max/mean may be unreliable. Reduce shutter/ISO.")
+    if jpeg_caveat:
+        warnings.append("JPEG mode: phone ISP (tone mapping/HDR) may skew comparability.")
+    if core_area < 200:
+        warnings.append("Core area very small — results may be noisy.")
+
+    # ── Debug overlay (JPEG with green contours — legacy) ─────────────
+    if img_bgr_8bit is not None:
+        debug_vis = img_bgr_8bit.copy()
+    else:
+        # For RAW, create an 8-bit visualisation
+        vis = np.clip(img_linear * 255, 0, 255).astype(np.uint8)
+        debug_vis = cv2.cvtColor(vis, cv2.COLOR_RGB2BGR)
+    contours, _ = cv2.findContours(core_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     cv2.drawContours(debug_vis, contours, -1, (0, 255, 0), 2)
-    
-    # Encode
-    _, encoded_img = cv2.imencode('.jpg', debug_vis)
-    debug_img_b64 = "data:image/jpeg;base64," + base64.b64encode(encoded_img).decode('utf-8')
-    
+    _, enc = cv2.imencode(".jpg", debug_vis)
+    debug_b64 = "data:image/jpeg;base64," + base64.b64encode(enc).decode("utf-8")
+
+    # ── RGBA overlay PNG (transparent, for live preview) ──────────────
+    overlay_b64 = _build_overlay_png(core_mask, (h, w))
+
     return {
-        "status": "success",
-        "is_black_box": True,
-        "blue_detected": True,
-        "metrics": metrics,
-        "debug_info": {**bb_debug, "blue_area_px": int(blue_area_px)},
-        "debug_image": debug_img_b64
+        "status":             "success",
+        "is_black_box":       True,
+        "blue_detected":      blue_detected,
+        "capture_mode":       capture_mode,
+        "metrics":            metrics,
+        "warnings":           warnings,
+        "debug_info": {
+            **bb_debug,
+            "blue_area_px":      blue_area,
+            "core_area_px":      core_area,
+            "sensitivity_used":  float(sensitivity),
+        },
+        "debug_image":        debug_b64,
+        "overlay_png_base64": overlay_b64,
+    }
+
+
+# ── Error helper ──────────────────────────────────────────────────────
+
+def _error(error_type, message):
+    return {
+        "status":             "error",
+        "error_type":         error_type,
+        "message":            message,
+        "debug_info":         {},
+        "metrics":            {},
+        "debug_image":        None,
+        "overlay_png_base64": None,
     }
