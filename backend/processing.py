@@ -132,8 +132,6 @@ def _keep_best_component_by_sum(mask, score_map, min_area=50):
     labelled, n = ndimage.label(mask > 0)
     if n == 0:
         return mask
-    if n == 1:
-        return mask
 
     score_pos = np.maximum(score_map, 0.0)
     best_label = -1
@@ -161,8 +159,8 @@ def _keep_best_component_by_sum(mask, score_map, min_area=50):
             best_label = lbl
 
     if best_label < 0:
-        # All components were filtered — fall back to returning the original mask
-        return mask
+        # All components were filtered — return empty mask
+        return np.zeros_like(mask)
 
     return ((labelled == best_label) * 255).astype(np.uint8)
 
@@ -298,37 +296,61 @@ def analyze_image(
         }
 
     # ══════════════════════════════════════════════════════════════════
-    # D.  BLUE REGION — all pixels where blue is dominant
+    # D.  BLUE REGION — isolation of the glow
     # ══════════════════════════════════════════════════════════════════
     R = img_linear_dn[:, :, 0]
     G = img_linear_dn[:, :, 1]
     B = img_linear_dn[:, :, 2]
 
-    # Noise floor: ignore pixels that are essentially black
-    noise_floor = 0.002
+    # 1. Calculate blue dominance score
+    blue_score = (B - np.maximum(R, G)).astype(np.float32)
+    
+    # 2. Mild spatial denoise to average out pixel noise and cohere the faint glow
+    blue_score_blur = cv2.GaussianBlur(blue_score, (15, 15), 0)
+    
+    # 3. Dynamic background subtraction. If the camera applies AWB, the dark 
+    #    frame might have a global blue tint. We sample the 5th percentile 
+    #    (deep shadow outside any glow) to find this baseline and subtract it.
+    bg_blue = float(np.percentile(blue_score_blur, 5))
+    blue_signal = blue_score_blur - bg_blue
 
-    # Blue mask: every pixel where blue channel exceeds both red and green
-    # and is above the noise floor.  No component selection — we keep ALL
-    # blue-dominant pixels across the whole image.
-    blue_mask = ((B > R) & (B > G) & (B > noise_floor)).astype(np.uint8) * 255
+    # 4. Target binarisation at a low margin above the dynamic background.
+    base_mask = (blue_signal > 0.0015).astype(np.uint8) * 255
+
+    # 5. Extract the single most significant contiguous component to reject scattered noise
+    blue_mask = _keep_best_component_by_sum(base_mask, blue_signal, min_area=MIN_BLUE_AREA_PX)
 
     blue_area = int(cv2.countNonZero(blue_mask))
+    
+    # 6. Validate that the detected blob is a true signal peak, not just a subtle noise drift.
+    #    We require the peak of the signal inside the blob to be at least 0.003 linear (~sRGB 12).
+    if blue_area > MIN_BLUE_AREA_PX:
+        peak_signal = float(np.max(blue_signal[blue_mask == 255]))
+        if peak_signal < 0.003:
+            blue_mask.fill(0)
+            blue_area = 0
+
     blue_detected = blue_area > MIN_BLUE_AREA_PX
 
     # ══════════════════════════════════════════════════════════════════
-    # E.  SENSITIVITY SLIDER — simple brightness cutoff
-    #     slider=0  → keep all blue pixels (no cutoff)
-    #     slider=100 → keep only the top 1% brightest blue pixels
+    # E.  SENSITIVITY SLIDER — core isolation within the best blob
     # ══════════════════════════════════════════════════════════════════
-    b_in_blue = B[blue_mask == 255]
-
-    if b_in_blue.size > 0 and sensitivity > 0:
-        # Map slider 0-100 → percentile 0-99 of the blue region's brightness
-        cutoff_pct = sensitivity * 0.99          # 0→0th pctl, 100→99th pctl
-        cutoff = float(np.percentile(b_in_blue, cutoff_pct))
-        core_mask = ((blue_mask == 255) & (B >= cutoff)).astype(np.uint8) * 255
+    if blue_detected:
+        # We use a mildly blurred B channel to determine the core threshold boundary.
+        # This prevents the final mask contour from becoming a jagged, pixelated 
+        # mesh due to inherent channel noise.
+        B_blur_core = cv2.GaussianBlur(B, (7, 7), 0)
+        b_in_blob = B_blur_core[blue_mask == 255]
+        
+        if sensitivity > 0:
+            # Map slider 0-100 → percentile 0-90 of the detected blob. We use 90% as an upper bounds.
+            cutoff_pct = sensitivity * 0.90
+            cutoff = float(np.percentile(b_in_blob, cutoff_pct))
+            core_mask = ((blue_mask == 255) & (B_blur_core >= cutoff)).astype(np.uint8) * 255
+        else:
+            core_mask = blue_mask.copy()
     else:
-        core_mask = blue_mask.copy()             # slider=0: keep everything
+        core_mask = np.zeros_like(blue_mask)
 
     core_area = int(cv2.countNonZero(core_mask))
 
