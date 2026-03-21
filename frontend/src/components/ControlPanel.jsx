@@ -1,5 +1,5 @@
 import React from 'react';
-import { Play, Trash2, FileDown, Bug, Zap, Camera } from 'lucide-react';
+import { Play, Trash2, FileDown, Bug, Zap, Camera, TrendingUp } from 'lucide-react';
 
 export function ControlPanel({
     onStart,
@@ -15,6 +15,8 @@ export function ControlPanel({
     isProcessing,
     doneCount,
     dirtyCount,
+    onGenerateGraph,
+    allH2O2Filled,
 }) {
     return (
         <aside className="w-full lg:w-[300px] xl:w-[320px] flex-shrink-0">
@@ -150,11 +152,13 @@ export function ControlPanel({
                 <div className="space-y-2.5">
                     <button
                         onClick={onStart}
-                        disabled={queueLength === 0 || isProcessing}
+                        disabled={queueLength === 0 || isProcessing || !allH2O2Filled}
                         className="btn-primary w-full"
                     >
                         <Play size={16} />
-                        {isProcessing ? 'Processing…' : dirtyCount > 0 ? `Process ${dirtyCount} Dirty` : 'Process Queue'}
+                        {isProcessing ? 'Processing…' 
+                         : (queueLength > 0 && !allH2O2Filled) ? 'Enter H₂O₂ for all'
+                         : dirtyCount > 0 ? `Process ${dirtyCount} Dirty` : 'Process Queue'}
                     </button>
 
                     <button
@@ -173,6 +177,15 @@ export function ControlPanel({
                     >
                         <FileDown size={15} />
                         Export Results
+                    </button>
+
+                    <button
+                        onClick={onGenerateGraph}
+                        disabled={doneCount === 0}
+                        className="btn-outline w-full border-accent text-accent hover:bg-accent hover:text-white"
+                    >
+                        <TrendingUp size={15} />
+                        Generate Graph
                     </button>
                 </div>
 

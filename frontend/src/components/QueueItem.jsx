@@ -2,7 +2,7 @@ import React, { useState, useCallback } from 'react';
 import {
     ChevronDown, ChevronUp, Trash2, RefreshCw,
     AlertTriangle, CheckCircle2, Clock, Loader2,
-    Shield, Droplets, Gauge, Activity, Eye, Zap, Info
+    Shield, Droplets, Gauge, Activity, Eye, Zap, Info, GripVertical
 } from 'lucide-react';
 
 /* ─── Status Badge ─── */
@@ -50,7 +50,7 @@ const fmt = (v, d = 4) => v != null ? Number(v).toFixed(d) : '—';
 const fmtInt = (v) => v != null ? Number(v).toLocaleString() : '—';
 
 /* ─── Queue Item Card ─── */
-export function QueueItem({ item, onRemove, onRetry, debugMode, onUpdateSettings, onPreview, globalSensitivity, captureMode }) {
+export function QueueItem({ item, dragHandleProps, onRemove, onRetry, debugMode, onUpdateSettings, onUpdateH2O2, onPreview, globalSensitivity, captureMode }) {
     const [expanded, setExpanded] = useState(false);
     const [localOverrides, setLocalOverrides] = useState(item.overrides || {});
 
@@ -97,6 +97,15 @@ export function QueueItem({ item, onRemove, onRetry, debugMode, onUpdateSettings
                 className="flex items-center gap-3 p-3 cursor-pointer select-none"
                 onClick={() => setExpanded(!expanded)}
             >
+                {/* Drag Handle */}
+                <div 
+                    {...dragHandleProps} 
+                    className="p-1 text-surface-4 hover:text-muted cursor-grab active:cursor-grabbing"
+                    onClick={(e) => e.stopPropagation()}
+                >
+                    <GripVertical size={16} />
+                </div>
+
                 {/* Thumbnail with overlay */}
                 <div className="w-11 h-11 rounded-lg bg-surface-0 overflow-hidden flex-shrink-0 border border-border relative">
                     <img src={item.preview} alt="" className="w-full h-full object-cover" />
@@ -119,6 +128,17 @@ export function QueueItem({ item, onRemove, onRetry, debugMode, onUpdateSettings
                         )}
                     </div>
                     <StatusBadge status={item.status} dirty={isDirty} />
+                </div>
+
+                {/* Inline H2O2 Input */}
+                <div className="w-24 sm:w-28 flex flex-col px-2" onClick={(e) => e.stopPropagation()}>
+                    <input
+                        type="number"
+                        placeholder="H₂O₂"
+                        className="input-field !py-1 !text-xs w-full text-center"
+                        value={item.h2o2 ?? ''}
+                        onChange={(e) => onUpdateH2O2(item.id, e.target.value)}
+                    />
                 </div>
 
                 {/* Inline metric preview */}

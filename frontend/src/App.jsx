@@ -1,8 +1,10 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import axios from 'axios';
 import { Upload, WifiOff, Microscope } from 'lucide-react';
+import { DragDropContext, Droppable, Draggable } from '@hello-pangea/dnd';
 import { ControlPanel } from './components/ControlPanel';
 import { QueueItem } from './components/QueueItem';
+import { GraphModal } from './components/GraphModal';
 
 const API_URL = 'http://localhost:8000';
 
@@ -22,10 +24,14 @@ function App() {
     const [debugMode, setDebugMode] = useState(false);
     const [isProcessing, setIsProcessing] = useState(false);
     const [isDragOver, setIsDragOver] = useState(false);
+    const [showGraphModal, setShowGraphModal] = useState(false);
     const fileInputRef = useRef(null);
 
     const doneCount = queue.filter((i) => i.status === 'success' && !i.dirty).length;
     const dirtyCount = queue.filter((i) => i.dirty).length;
+    
+    // Require H2O2 concentrations for all items to allow processing
+    const allH2O2Filled = queue.every(i => i.h2o2 !== '' && i.h2o2 !== null);
 
     /* ─── Capture mode change → mark ALL items dirty ─── */
     const prevCaptureMode = useRef(captureMode);
@@ -54,6 +60,7 @@ function App() {
             preview: URL.createObjectURL(file),
             globalSettingsUsed: { ...globalSettings },
             overrides: {},
+            h2o2: '', // New H2O2 concentration field
             dirty: false,
             lastAnalyzedWith: null,
         }));
@@ -67,6 +74,10 @@ function App() {
 
     const removeItem = (id) => {
         setQueue((prev) => prev.filter((i) => i.id !== id));
+    };
+
+    const updateItemH2O2 = (id, val) => {
+        setQueue(prev => prev.map(i => i.id === id ? { ...i, h2o2: val } : i));
     };
 
     const updateItemSettings = (id, newOverrides) => {
@@ -222,6 +233,14 @@ function App() {
     const handleDragLeave = () => setIsDragOver(false);
     const handleDrop = (e) => { e.preventDefault(); setIsDragOver(false); handleFiles(e.dataTransfer.files); };
 
+    const handleDragEnd = (result) => {
+        if (!result.destination) return;
+        const items = Array.from(queue);
+        const [reorderedItem] = items.splice(result.source.index, 1);
+        items.splice(result.destination.index, 0, reorderedItem);
+        setQueue(items);
+    };
+
     /* File accept types based on capture mode */
     const fileAccept = captureMode === 'raw'
         ? 'image/*,.dng,.cr2,.nef,.arw,.raf,.orf'
@@ -266,6 +285,7 @@ function App() {
                     onStart={processQueue}
                     onClear={clearQueue}
                     onExport={exportCSV}
+                    onGenerateGraph={() => setShowGraphModal(true)}
                     globalSettings={globalSettings}
                     setGlobalSettings={setGlobalSettings}
                     captureMode={captureMode}
@@ -276,6 +296,7 @@ function App() {
                     isProcessing={isProcessing}
                     doneCount={doneCount}
                     dirtyCount={dirtyCount}
+                    allH2O2Filled={allH2O2Filled}
                 />
 
                 {/* ─── Right: Queue & Results ─── */}
@@ -351,24 +372,55 @@ function App() {
                             </div>
 
                             <div className="space-y-2.5 pb-8">
-                                {queue.map((item) => (
-                                    <QueueItem
-                                        key={item.id}
-                                        item={item}
-                                        onRemove={removeItem}
-                                        onRetry={retryItem}
-                                        onUpdateSettings={updateItemSettings}
-                                        onPreview={onPreview}
-                                        debugMode={debugMode}
-                                        globalSensitivity={globalSettings.sensitivity}
-                                        captureMode={captureMode}
-                                    />
-                                ))}
+                                <DragDropContext onDragEnd={handleDragEnd}>
+                                    <Droppable droppableId="queue-list">
+                                        {(provided) => (
+                                            <div 
+                                                {...provided.droppableProps} 
+                                                ref={provided.innerRef}
+                                                className="space-y-2.5"
+                                            >
+                                                {queue.map((item, index) => (
+                                                    <Draggable key={item.id} draggableId={item.id} index={index}>
+                                                        {(provided) => (
+                                                            <div 
+                                                                ref={provided.innerRef} 
+                                                                {...provided.draggableProps}
+                                                            >
+                                                                <QueueItem
+                                                                    item={item}
+                                                                    dragHandleProps={provided.dragHandleProps}
+                                                                    onRemove={removeItem}
+                                                                    onRetry={retryItem}
+                                                                    onUpdateSettings={updateItemSettings}
+                                                                    onUpdateH2O2={updateItemH2O2}
+                                                                    onPreview={onPreview}
+                                                                    debugMode={debugMode}
+                                                                    globalSensitivity={globalSettings.sensitivity}
+                                                                    captureMode={captureMode}
+                                                                />
+                                                            </div>
+                                                        )}
+                                                    </Draggable>
+                                                ))}
+                                                {provided.placeholder}
+                                            </div>
+                                        )}
+                                    </Droppable>
+                                </DragDropContext>
                             </div>
                         </div>
                     )}
                 </main>
             </div>
+
+            {/* Graph Modal */}
+            {showGraphModal && (
+                <GraphModal 
+                    queue={queue} 
+                    onClose={() => setShowGraphModal(false)} 
+                />
+            )}
         </div>
     );
 }
