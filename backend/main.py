@@ -1,6 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from processing import analyze_image
+from video_processing import analyze_video
 import traceback
 
 app = FastAPI(title="Luminol Image Analysis API")
@@ -22,11 +23,15 @@ async def analyze_endpoint(
     iso: float = Form(0),
     sensitivity: float = Form(50),
     capture_mode: str = Form("jpeg"),
+    input_type: str = Form("image"),
 ):
     t = shutter_seconds if shutter_seconds > 0 else exposure_time
     try:
         contents = await image.read()
-        result = analyze_image(contents, t, iso, sensitivity, capture_mode)
+        if input_type == "video":
+            result = analyze_video(contents, t, iso, sensitivity, capture_mode)
+        else:
+            result = analyze_image(contents, t, iso, sensitivity, capture_mode)
         return result
     except Exception as e:
         traceback.print_exc()
@@ -41,6 +46,7 @@ async def preview_endpoint(
     iso: float = Form(0),
     sensitivity: float = Form(50),
     capture_mode: str = Form("jpeg"),
+    input_type: str = Form("image"),
 ):
     """
     Same computation as /analyze — separate endpoint for semantic clarity.
@@ -49,7 +55,10 @@ async def preview_endpoint(
     t = shutter_seconds if shutter_seconds > 0 else exposure_time
     try:
         contents = await image.read()
-        result = analyze_image(contents, t, iso, sensitivity, capture_mode)
+        if input_type == "video":
+            result = analyze_video(contents, t, iso, sensitivity, capture_mode)
+        else:
+            result = analyze_image(contents, t, iso, sensitivity, capture_mode)
         return result
     except Exception as e:
         traceback.print_exc()

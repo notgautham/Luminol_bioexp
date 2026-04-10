@@ -49,10 +49,17 @@ function App() {
     }, [captureMode]);
 
     /* ─── File Handling ─── */
+    const isVideoFile = (file) => {
+        if (file.type && file.type.startsWith('video/')) return true;
+        const ext = file.name.split('.').pop()?.toLowerCase();
+        return ['mp4', 'mov', 'avi', 'mkv', 'webm'].includes(ext);
+    };
+
     const handleFiles = (files) => {
         const newItems = Array.from(files).map((file) => ({
             id: Math.random().toString(36).substr(2, 9),
             file,
+            inputType: isVideoFile(file) ? 'video' : 'image',
             status: 'pending',
             progress: 0,
             result: null,
@@ -60,7 +67,7 @@ function App() {
             preview: URL.createObjectURL(file),
             globalSettingsUsed: { ...globalSettings },
             overrides: {},
-            h2o2: '', // New H2O2 concentration field
+            h2o2: '',
             dirty: false,
             lastAnalyzedWith: null,
         }));
@@ -106,6 +113,7 @@ function App() {
         formData.append('iso', iso);
         formData.append('sensitivity', sens);
         formData.append('capture_mode', captureMode);
+        formData.append('input_type', item.inputType || 'image');
         return { formData, usedSettings: { t, iso, sensitivity: sens, captureMode } };
     }, [globalSettings, captureMode]);
 
@@ -243,8 +251,8 @@ function App() {
 
     /* File accept types based on capture mode */
     const fileAccept = captureMode === 'raw'
-        ? 'image/*,.dng,.cr2,.nef,.arw,.raf,.orf'
-        : 'image/*';
+        ? 'image/*,.dng,.cr2,.nef,.arw,.raf,.orf,video/mp4,video/quicktime,.mov,.mp4'
+        : 'image/*,video/mp4,video/quicktime,.mov,.mp4';
 
     /* ─── Render ─── */
     return (
@@ -338,12 +346,12 @@ function App() {
                             <Upload size={20} className={`transition-colors ${isDragOver ? 'text-accent-glow' : 'text-muted group-hover:text-accent-glow'}`} />
                         </div>
                         <h3 className={`text-sm font-medium mb-1 transition-colors ${isDragOver ? 'text-accent-glow' : 'text-slate-400'}`}>
-                            {isDragOver ? 'Release to add images' : 'Drop experiment images here'}
+                            {isDragOver ? 'Release to add files' : 'Drop experiment images or videos here'}
                         </h3>
                         <p className="text-[11px] text-muted">
                             {captureMode === 'raw'
-                                ? 'DNG · CR2 · NEF · ARW — Linear decode, local processing'
-                                : 'JPG · PNG · TIFF — Processing happens locally'
+                                ? 'DNG · CR2 · NEF · ARW · MP4 · MOV — Linear decode, local processing'
+                                : 'JPG · PNG · TIFF · MP4 · MOV — Processing happens locally'
                             }
                         </p>
                     </div>
@@ -352,7 +360,7 @@ function App() {
                     {queue.length > 0 && (
                         <div className="space-y-3">
                             <div className="flex items-center justify-between px-1">
-                                <h2 className="section-title">Image Queue ({queue.length})</h2>
+                                <h2 className="section-title">Analysis Queue ({queue.length})</h2>
                                 <div className="flex items-center gap-3 text-[11px] text-muted">
                                     <span className="flex items-center gap-1">
                                         <span className="w-1.5 h-1.5 rounded-full bg-success inline-block" />

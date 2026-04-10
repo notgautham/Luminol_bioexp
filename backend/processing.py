@@ -1,7 +1,11 @@
 """
 Luminol Blue Intensity Analyzer — Processing Pipeline
 =====================================================
-Single public entry point: analyze_image()
+Public entry points:
+  analyze_image()  — for file uploads (decodes bytes first)
+  _run_analysis()  — shared pipeline steps B-G, callable directly with a
+                     pre-decoded BGR frame (used by video_processing.py to
+                     avoid any encode/decode round-trip)
 
 Why mean/integrated metrics instead of max:
   In most luminol images the peak blue channel clips at 255 (sRGB → ~1.0
@@ -187,7 +191,7 @@ def _build_overlay_png(core_mask, shape_hw):
 
 
 # ──────────────────────────────────────────────────────────────────────
-# PUBLIC ENTRY POINT
+# PUBLIC ENTRY POINTS
 # ──────────────────────────────────────────────────────────────────────
 
 def analyze_image(
@@ -198,22 +202,12 @@ def analyze_image(
     capture_mode: str = "jpeg",
 ):
     """
-    Analyse a luminol chemiluminescence image.
+    Analyse a luminol chemiluminescence image from raw file bytes.
 
-    Parameters
-    ----------
-    image_bytes    : Raw file bytes.
-    shutter_seconds: Shutter speed in seconds (e.g. 0.0167 for 1/60).
-    iso            : Camera ISO.
-    sensitivity    : Core-mask strictness 0-100.  Higher = stricter.
-    capture_mode   : "jpeg" or "raw".
-
-    Returns
-    -------
-    dict  JSON-serialisable result.
+    Decodes the file then delegates to _run_analysis() for all metric
+    computation. For video frames, call _run_analysis() directly with
+    the BGR numpy array to skip the encode/decode round-trip.
     """
-    sensitivity = max(0, min(100, float(sensitivity)))
-
     # ══════════════════════════════════════════════════════════════════
     # A.  DECODE + MODE MISMATCH CHECK
     # ══════════════════════════════════════════════════════════════════
@@ -223,14 +217,12 @@ def analyze_image(
     img_bgr_8bit = None  # only available in jpeg path
 
     if capture_mode == "raw":
-        # Expect RAW/DNG data
         if is_jpeg_data and not is_raw_data:
             return _error("MODE_MISMATCH",
                           "JPEG/PNG file uploaded but RAW mode is selected. "
                           "Switch to JPEG mode or upload a DNG/RAW file.")
         img_linear, bit_depth = _decode_raw(image_bytes)
         if img_linear is None:
-            # Maybe rawpy not installed or decode failed
             if not HAS_RAWPY:
                 return _error("RAW_DECODE_FAIL",
                               "rawpy is not installed. Install it with: pip install rawpy")
@@ -250,19 +242,49 @@ def analyze_image(
         sat_threshold_linear = srgb_to_linear(np.array([250/255.0], dtype=np.float32))[0]
         jpeg_caveat = True
 
+    return _run_analysis(
+        img_linear, img_bgr_8bit, sat_threshold_linear, jpeg_caveat,
+        shutter_seconds, iso, sensitivity, capture_mode,
+    )
+
+
+def _run_analysis(
+    img_linear,
+    img_bgr_8bit,
+    sat_threshold_linear,
+    jpeg_caveat,
+    shutter_seconds,
+    iso,
+    sensitivity,
+    capture_mode,
+):
+    """
+    Run pipeline steps B–G on pre-linearised image data.
+
+    This is the shared entry point used by both analyze_image() (after file
+    decode) and video_processing.py (which passes a BGR frame array directly,
+    skipping any encode→decode round-trip entirely).
+
+    Parameters
+    ----------
+    img_linear          : float32 RGB linear [0-1], shape (H, W, 3).
+    img_bgr_8bit        : uint8 BGR [0-255] (H, W, 3) for JPEG/video path;
+                          None for RAW path.
+    sat_threshold_linear: Linear-space saturation clipping threshold.
+    jpeg_caveat         : True when input is JPEG or compressed video.
+    shutter_seconds, iso, sensitivity, capture_mode : passed through.
+    """
+    sensitivity = max(0, min(100, float(sensitivity)))
     h, w = img_linear.shape[:2]
 
     # ══════════════════════════════════════════════════════════════════
     # B.  MILD DENOISE (on linear data)
     # ══════════════════════════════════════════════════════════════════
-    # For jpeg path we can denoise the 8-bit then re-linearise.
-    # For raw path we do a mild bilateral on the float data.
     if img_bgr_8bit is not None:
         dn_bgr = cv2.fastNlMeansDenoisingColored(img_bgr_8bit, None, 3, 3, 7, 21)
         dn_rgb = cv2.cvtColor(dn_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         img_linear_dn = srgb_to_linear(dn_rgb)
     else:
-        # RAW path: simple gaussian blur as mild denoise on float
         img_linear_dn = cv2.GaussianBlur(img_linear, (5, 5), 0.8)
 
     # ══════════════════════════════════════════════════════════════════
@@ -302,28 +324,14 @@ def analyze_image(
     G = img_linear_dn[:, :, 1]
     B = img_linear_dn[:, :, 2]
 
-    # 1. Calculate blue dominance score
     blue_score = (B - np.maximum(R, G)).astype(np.float32)
-    
-    # 2. Mild spatial denoise to average out pixel noise and cohere the faint glow
     blue_score_blur = cv2.GaussianBlur(blue_score, (15, 15), 0)
-    
-    # 3. Dynamic background subtraction. If the camera applies AWB, the dark 
-    #    frame might have a global blue tint. We sample the 5th percentile 
-    #    (deep shadow outside any glow) to find this baseline and subtract it.
     bg_blue = float(np.percentile(blue_score_blur, 5))
     blue_signal = blue_score_blur - bg_blue
-
-    # 4. Target binarisation at a low margin above the dynamic background.
     base_mask = (blue_signal > 0.0015).astype(np.uint8) * 255
-
-    # 5. Extract the single most significant contiguous component to reject scattered noise
     blue_mask = _keep_best_component_by_sum(base_mask, blue_signal, min_area=MIN_BLUE_AREA_PX)
-
     blue_area = int(cv2.countNonZero(blue_mask))
-    
-    # 6. Validate that the detected blob is a true signal peak, not just a subtle noise drift.
-    #    We require the peak of the signal inside the blob to be at least 0.003 linear (~sRGB 12).
+
     if blue_area > MIN_BLUE_AREA_PX:
         peak_signal = float(np.max(blue_signal[blue_mask == 255]))
         if peak_signal < 0.003:
@@ -336,14 +344,9 @@ def analyze_image(
     # E.  SENSITIVITY SLIDER — core isolation within the best blob
     # ══════════════════════════════════════════════════════════════════
     if blue_detected:
-        # We use a mildly blurred B channel to determine the core threshold boundary.
-        # This prevents the final mask contour from becoming a jagged, pixelated 
-        # mesh due to inherent channel noise.
         B_blur_core = cv2.GaussianBlur(B, (7, 7), 0)
         b_in_blob = B_blur_core[blue_mask == 255]
-        
         if sensitivity > 0:
-            # Map slider 0-100 → percentile 0-90 of the detected blob. We use 90% as an upper bounds.
             cutoff_pct = sensitivity * 0.90
             cutoff = float(np.percentile(b_in_blob, cutoff_pct))
             core_mask = ((blue_mask == 255) & (B_blur_core >= cutoff)).astype(np.uint8) * 255
@@ -364,7 +367,6 @@ def analyze_image(
     max_lin    = float(np.max(b_core))                 if b_core.size > 0 else 0.0
     p99_5_lin  = float(np.percentile(b_core, 99.5))    if b_core.size > 0 else 0.0
 
-    # Saturation ratio (bit-depth aware)
     if b_core.size > 0:
         sat_count  = int(np.sum(b_core >= sat_threshold_linear))
         sat_ratio  = float(sat_count / core_area) if core_area > 0 else 0.0
@@ -372,15 +374,13 @@ def analyze_image(
         sat_count  = 0
         sat_ratio  = 0.0
 
-    # Legacy max_blue_raw (8-bit B channel in sRGB — only valid for jpeg path)
     if img_bgr_8bit is not None and core_area > 0:
         _, max_raw, _, _ = cv2.minMaxLoc(img_bgr_8bit[:, :, 0], mask=core_mask)
         max_raw = float(max_raw)
     else:
-        max_raw = float(max_lin * 255)  # approximate for RAW or empty core
+        max_raw = float(max_lin * 255)
 
-    # ── Normalisation ─────────────────────────────────────────────────
-    t   = float(shutter_seconds) if shutter_seconds else 0.0
+    t     = float(shutter_seconds) if shutter_seconds else 0.0
     iso_v = float(iso) if iso else 0.0
     denom = t * (iso_v / 100.0) if (t > 0 and iso_v > 0) else 0.0
 
@@ -392,7 +392,7 @@ def analyze_image(
     # G.  BUILD RESPONSE
     # ══════════════════════════════════════════════════════════════════
     metrics = {
-        # ── Primary (new) ──
+        # ── Primary ──
         "mean_linear_core":         mean_lin,
         "integrated_linear_core":   integ_lin,
         "core_area_px":             core_area,
@@ -403,8 +403,7 @@ def analyze_image(
         "max_norm":                 max_norm,
         "saturation_ratio":         sat_ratio,
         "saturation_warning":       sat_ratio > 0.05,
-
-        # ── Legacy (backward compat — kept for frontend) ──
+        # ── Legacy keys kept for frontend compatibility ──
         "mean_blue_linear_core":       mean_lin,
         "p95_blue_linear_core":        p99_5_lin,
         "integrated_blue_linear_core": integ_lin,
@@ -414,7 +413,6 @@ def analyze_image(
         "blue_mask_area_px":           blue_area,
     }
 
-    # ── Warnings list ─────────────────────────────────────────────────
     warnings = []
     if sat_ratio > 0.05:
         warnings.append("Saturation detected; max/mean may be unreliable. Reduce shutter/ISO.")
@@ -423,11 +421,9 @@ def analyze_image(
     if core_area < 200:
         warnings.append("Core area very small — results may be noisy.")
 
-    # ── Debug overlay (JPEG with green contours — legacy) ─────────────
     if img_bgr_8bit is not None:
         debug_vis = img_bgr_8bit.copy()
     else:
-        # For RAW, create an 8-bit visualisation
         vis = np.clip(img_linear * 255, 0, 255).astype(np.uint8)
         debug_vis = cv2.cvtColor(vis, cv2.COLOR_RGB2BGR)
     contours, _ = cv2.findContours(core_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -435,7 +431,6 @@ def analyze_image(
     _, enc = cv2.imencode(".jpg", debug_vis)
     debug_b64 = "data:image/jpeg;base64," + base64.b64encode(enc).decode("utf-8")
 
-    # ── RGBA overlay PNG (transparent, for live preview) ──────────────
     overlay_b64 = _build_overlay_png(core_mask, (h, w))
 
     return {

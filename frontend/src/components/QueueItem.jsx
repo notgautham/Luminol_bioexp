@@ -2,7 +2,7 @@ import React, { useState, useCallback } from 'react';
 import {
     ChevronDown, ChevronUp, Trash2, RefreshCw,
     AlertTriangle, CheckCircle2, Clock, Loader2,
-    Shield, Droplets, Gauge, Activity, Eye, Zap, Info, GripVertical
+    Shield, Droplets, Gauge, Activity, Eye, Zap, Info, GripVertical, Film
 } from 'lucide-react';
 
 /* ─── Status Badge ─── */
@@ -108,7 +108,16 @@ export function QueueItem({ item, dragHandleProps, onRemove, onRetry, debugMode,
 
                 {/* Thumbnail with overlay */}
                 <div className="w-11 h-11 rounded-lg bg-surface-0 overflow-hidden flex-shrink-0 border border-border relative">
-                    <img src={item.preview} alt="" className="w-full h-full object-cover" />
+                    {item.inputType === 'video' ? (
+                        /* Video: show peak frame preview if available, otherwise show video element */
+                        isDone && result?.peak_frame_preview ? (
+                            <img src={result.peak_frame_preview} alt="" className="w-full h-full object-cover" />
+                        ) : (
+                            <video src={item.preview} muted className="w-full h-full object-cover" />
+                        )
+                    ) : (
+                        <img src={item.preview} alt="" className="w-full h-full object-cover" />
+                    )}
                     {isActive && (
                         <div className="absolute inset-0 bg-surface-0/70 flex items-center justify-center">
                             <Loader2 size={16} className="text-accent-glow animate-spin" />
@@ -116,6 +125,12 @@ export function QueueItem({ item, dragHandleProps, onRemove, onRetry, debugMode,
                     )}
                     {isDirty && !isActive && (
                         <div className="absolute top-0.5 right-0.5 w-2 h-2 rounded-full bg-warn shadow-sm" />
+                    )}
+                    {/* VIDEO badge */}
+                    {item.inputType === 'video' && (
+                        <div className="absolute bottom-0 left-0 right-0 bg-surface-0/80 text-[7px] text-accent-glow font-bold text-center py-px tracking-widest">
+                            VIDEO
+                        </div>
                     )}
                 </div>
 
@@ -190,7 +205,13 @@ export function QueueItem({ item, dragHandleProps, onRemove, onRetry, debugMode,
 
                         {/* Preview with overlay (2 cols) */}
                         <div className="md:col-span-2 relative rounded-lg overflow-hidden bg-surface-0 border border-border min-h-[180px] flex items-center justify-center">
-                            <img src={item.preview} className="max-w-full max-h-[280px] object-contain" alt="" />
+                            {item.inputType === 'video' && isDone && result?.peak_frame_preview ? (
+                                <img src={result.peak_frame_preview} className="max-w-full max-h-[280px] object-contain" alt="Peak frame" />
+                            ) : item.inputType === 'video' ? (
+                                <video src={item.preview} muted className="max-w-full max-h-[280px] object-contain" />
+                            ) : (
+                                <img src={item.preview} className="max-w-full max-h-[280px] object-contain" alt="" />
+                            )}
 
                             {/* Core mask overlay — always shown when available */}
                             {result?.overlay_png_base64 && (
@@ -199,6 +220,13 @@ export function QueueItem({ item, dragHandleProps, onRemove, onRetry, debugMode,
                                     className="absolute inset-0 w-full h-full object-contain pointer-events-none"
                                     alt=""
                                 />
+                            )}
+
+                            {/* Video: show peak frame as main preview instead of video blob */}
+                            {item.inputType === 'video' && isDone && result?.peak_frame_preview && (
+                                <div className="absolute top-2 left-2 flex items-center gap-1 badge-processing !text-[9px] !bg-surface-0/70">
+                                    <Film size={9} /> Peak Frame #{result.video_info?.peak_frame_index_1based ?? result.video_info?.peak_frame_index ?? '?'}
+                                </div>
                             )}
 
                             {/* Debug overlay (legacy contour JPEG) */}
@@ -306,6 +334,21 @@ export function QueueItem({ item, dragHandleProps, onRemove, onRetry, debugMode,
                                             <span className="text-xs text-warn">{w}</span>
                                         </div>
                                     ))}
+                                </div>
+                            )}
+
+                            {/* Video Info */}
+                            {isDone && result?.video_info && (
+                                <div className="rounded-lg border border-accent/15 bg-accent-surface p-2.5 flex items-center gap-3">
+                                    <Film size={14} className="text-accent-glow flex-shrink-0" />
+                                    <div className="text-[11px] text-slate-300 space-x-3">
+                                        <span>Peak frame: <strong className="text-accent-glow font-mono">#{result.video_info.peak_frame_index_1based ?? result.video_info.peak_frame_index}</strong></span>
+                                        <span>at <strong className="font-mono">{result.video_info.peak_frame_timestamp}s</strong></span>
+                                        <span className="text-muted">·</span>
+                                        <span>Duration: <strong className="font-mono">{result.video_info.duration_seconds}s</strong></span>
+                                        <span className="text-muted">·</span>
+                                        <span>{result.video_info.total_frames} frames @ {result.video_info.fps} fps</span>
+                                    </div>
                                 </div>
                             )}
 
