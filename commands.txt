@@ -1,0 +1,9 @@
+# Commands to start the application
+
+## 1. Start the Backend. Open a command prompt and run:
+cd backend
+python -m uvicorn main:app --reload
+
+## 2. Start the Frontend. Open a SECOND command prompt and run:
+cd frontend
+npm run dev
